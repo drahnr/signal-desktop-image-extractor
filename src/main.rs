@@ -1,5 +1,6 @@
-use chrono::{Date, DateTime, Datelike, LocalResult, TimeZone, Utc};
+use chrono::{Date, DateTime, Datelike, LocalResult, TimeZone, Timelike, Utc};
 use clap::Parser;
+use color_eyre::eyre::OptionExt;
 use fs_err as fs;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -82,32 +83,42 @@ fn main() -> color_eyre::Result<()> {
 
     let config = fs_err::File::open(config)?;
     let val: serde_json::Value = serde_json::from_reader(config)?;
-    let val = val.as_object().unwrap();
-    let val = val.get("key").unwrap().to_string();
+    let val = val
+        .as_object()
+        .ok_or_eyre("Failed to parse config.json file")?;
+    let val = val
+        .get("key")
+        .ok_or_eyre(r##"Missing "key" key in config.json"##)?
+        .to_string();
 
     conn.pragma_update(None, "KEY", format!(r###"x'{}'"###, val.trim_matches('"')))?;
 
     let mut stmt = conn.prepare("SELECT rowid, id, json, sent_at, conversationId, received_at, hasAttachments, hasFileAttachments, hasVisualMediaAttachments, body, sourceUuid, serverGuid, expiresAt  FROM messages")?;
-    let ts = |secs| DateTime::<Utc>::from_timestamp(secs, 0).unwrap();
-    let uu = |s: String| Uuid::try_parse(&s).unwrap();
-    let iter = stmt.query_map([], |row| {
+    let ts = |secs| {
+        DateTime::<Utc>::from_timestamp(secs, 0)
+            .ok_or_eyre("Couldn't convert unix timestamp to date time type")
+    };
+    let uu = |s: String| Uuid::try_parse(&s);
+    let iter = stmt.query([])?;
+    let mapper = |row: &rusqlite::Row| -> color_eyre::Result<Message> {
         let json = row.get::<_, String>(2)?;
-        let json: J = serde_json::from_str(&json).unwrap();
+        let json: J = serde_json::from_str(&json)?;
         let row = Message {
             rowid: row.get(0)?,
-            id: uu(row.get(1)?),
+            id: uu(row.get(1)?)?,
             json: json.into(),
-            sent_at: ts(row.get(3)?),
-            conversation_id: uu(row.get(4)?),
-            received_at: ts(row.get(5)?),
+            sent_at: ts(row.get(3)?)?,
+            conversation_id: uu(row.get(4)?)?,
+            received_at: ts(row.get(5)?)?,
             has_attachments: row.get(6).unwrap_or_default(),
             has_file_attachments: row.get(7).unwrap_or_default(),
             has_visual_media_attachments: row.get(8).unwrap_or_default(),
             body: row.get(9).unwrap_or_default(),
         };
-        Ok(row)
-    })?;
+        color_eyre::Result::Ok(row)
+    };
 
+    let iter = iter.and_then(mapper);
     let inf = infer::Infer::new();
     for res in iter {
         match res {
@@ -115,20 +126,27 @@ fn main() -> color_eyre::Result<()> {
             Ok(m) => {
                 for at in m.json.attachments.into_iter().flatten() {
                     let fname = format!(
-                        "{}_{}",
-                        m.sent_at.to_rfc3339(),
+                        "signal_{}__{}",
+                        m.sent_at.format("20%y-%m-%dT%H:%M:%S"),
                         at.fileName.unwrap_or("unnamed".to_owned())
                     );
                     let src = base.join("attachments.noindex").join(&at.path);
-                    log::info!("Copying from {} to {}", src.display(), base_dest.display());
-                    let fallback = at.contentType.split_once('/').unwrap().1;
+                    let fallback = at
+                        .contentType
+                        .split_once('/')
+                        .ok_or_eyre(
+                            "JSON contained content type always contains exactly one slash",
+                        )?
+                        .1;
 
                     let ext = inf
                         .get_from_path(&src)?
                         .map(|x| x.extension())
                         .unwrap_or(&fallback);
 
-                    let dst = base_dest.join(fname).with_extension(ext);
+                    let dst = dbg!(&base_dest).join(dbg!(fname)).with_extension(ext);
+                    log::info!("Copying from {} to {}", src.display(), dst.display());
+
                     fs::copy(src, dst)?;
                 }
             }
