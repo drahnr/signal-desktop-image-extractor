@@ -1,4 +1,5 @@
 use chrono::{Date, DateTime, Datelike, LocalResult, TimeZone, Utc};
+use clap::Parser;
 use fs_err as fs;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -48,18 +49,35 @@ struct Message {
     body: String,
 }
 
-fn main() -> color_eyre::Result<()> {
-    pretty_env_logger::init();
-    let mut args = env::args();
-    let _ = args.next();
+#[derive(clap::Parser, Clone, Debug)]
+struct Args {
+    #[command(flatten)]
+    verbose: clap_verbosity::Verbosity,
+    #[arg(long, default_value = None)]
+    base: Option<std::path::PathBuf>,
+    #[arg(long)]
+    dest: std::path::PathBuf,
+}
 
-    let base_dest = std::path::PathBuf::from(args.next().unwrap());
-    let base = dirs::config_dir().unwrap().join("Signal");
+fn default_base() -> std::path::PathBuf {
+    dirs::config_dir().unwrap().join("Signal")
+}
+
+fn main() -> color_eyre::Result<()> {
+    let Args {
+        verbose,
+        base,
+        dest,
+    } = Args::parse();
+    pretty_env_logger::formatted_timed_builder()
+        .filter_level(verbose.log_level_filter())
+        .init();
+
+    let base_dest = dest;
+    let base = base.unwrap_or(default_base());
     let config = base.join("config.json");
-    let db = args
-        .next()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| base.join("sql").join("db.sqlite"));
+    let db = base.join("sql").join("db.sqlite");
+
     let conn = Connection::open(db)?;
 
     let config = fs_err::File::open(config)?;
