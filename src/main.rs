@@ -1,46 +1,45 @@
-use chrono::{Date, DateTime, Datelike, LocalResult, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Utc};
 use clap::Parser;
 use color_eyre::eyre::OptionExt;
 use fs_err as fs;
-use serde_json::Value;
-use std::collections::HashMap;
-use std::env::{self, home_dir};
-use std::fs::File;
-use std::io::{self, BufRead};
-use std::path::PathBuf;
-use uuid::{Timestamp, Uuid};
+use uuid::Uuid;
 
-use rusqlite::{Connection, Map, Result, Row};
+use rusqlite::Connection;
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Attachment {
     content: Option<String>,
     caption: Option<String>,
-    contentType: String,
+    content_type: String,
     flags: Option<u64>,
-    fileName: Option<String>,
+    file_name: Option<String>,
     size: u64,
     path: std::path::PathBuf,
     height: Option<u64>,
 }
 
+/// JSON child entry of a message in the messages table
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-struct J {
+#[serde(rename_all = "camelCase")]
+struct Json {
     attachments: Option<Vec<Attachment>>,
     body: Option<String>,
     // bodyRanges: Option<Vec<String>>,
     // contact: Vec<String>,
-    conversationId: Uuid,
+    conversation_id: Uuid,
     // errors: Option<Vec<String>>,
     flags: Option<u64>,
     id: Uuid,
 }
 
+/// A subset of a message in the messages table
 #[derive(Debug)]
+#[allow(dead_code)]
 struct Message {
     rowid: i64,
     id: Uuid,
-    json: J,
+    json: Json,
     sent_at: DateTime<Utc>,
     conversation_id: Uuid,
     received_at: DateTime<Utc>,
@@ -60,22 +59,20 @@ struct Args {
     dest: std::path::PathBuf,
 }
 
-fn default_base() -> std::path::PathBuf {
-    dirs::config_dir().unwrap().join("Signal")
-}
-
 fn main() -> color_eyre::Result<()> {
     let Args {
         verbose,
         base,
-        dest,
+        dest: dest_dir,
     } = Args::parse();
     pretty_env_logger::formatted_timed_builder()
         .filter_level(verbose.log_level_filter())
         .init();
 
-    let base_dest = dest;
-    let base = base.unwrap_or(default_base());
+    fs::create_dir_all(&dest_dir)?;
+
+    let base = base.unwrap_or(    dirs::config_dir().ok_or_eyre("Your system does not provide a XDG config dir, set XDG_CONFIG_HOME to provide in this case")?.join("Signal")
+);
     let config = base.join("config.json");
     let db = base.join("sql").join("db.sqlite");
 
@@ -102,7 +99,7 @@ fn main() -> color_eyre::Result<()> {
     let iter = stmt.query([])?;
     let mapper = |row: &rusqlite::Row| -> color_eyre::Result<Message> {
         let json = row.get::<_, String>(2)?;
-        let json: J = serde_json::from_str(&json)?;
+        let json: Json = serde_json::from_str(&json)?;
         let row = Message {
             rowid: row.get(0)?,
             id: uu(row.get(1)?)?,
@@ -128,11 +125,11 @@ fn main() -> color_eyre::Result<()> {
                     let fname = format!(
                         "signal_{}__{}",
                         m.sent_at.format("20%y-%m-%dT%H:%M:%S"),
-                        at.fileName.unwrap_or("unnamed".to_owned())
+                        at.file_name.unwrap_or("unnamed".to_owned())
                     );
                     let src = base.join("attachments.noindex").join(&at.path);
                     let fallback = at
-                        .contentType
+                        .content_type
                         .split_once('/')
                         .ok_or_eyre(
                             "JSON contained content type always contains exactly one slash",
@@ -144,7 +141,7 @@ fn main() -> color_eyre::Result<()> {
                         .map(|x| x.extension())
                         .unwrap_or(&fallback);
 
-                    let dst = dbg!(&base_dest).join(dbg!(fname)).with_extension(ext);
+                    let dst = dest_dir.join(fname).with_extension(ext);
                     log::info!("Copying from {} to {}", src.display(), dst.display());
 
                     fs::copy(src, dst)?;
